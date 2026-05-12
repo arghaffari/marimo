@@ -8,6 +8,12 @@ export const wasmInitializationAtom = atom<string>("Initializing...");
 export type WasmInitStatus = "loading" | "ready" | "error";
 export const wasmInitStatusAtom = atom<WasmInitStatus>("loading");
 
+/**
+ * Captured error message from a failed Pyodide initialization. Set by the
+ * bridge alongside `wasmInitStatusAtom = "error"`; `null` otherwise.
+ */
+export const wasmInitErrorAtom = atom<string | null>(null);
+
 export const hasAnyOutputAtom = atom<boolean>((get) => {
   const notebook = get(notebookAtom);
   const runtimeStates = Object.values(notebook.cellRuntime);

@@ -37,7 +37,11 @@ import type { IConnectionTransport } from "../websocket/transports/transport";
 import { PyodideRouter } from "./router";
 import { getWorkerRPC } from "./rpc";
 import { createShareableLink } from "./share";
-import { wasmInitializationAtom, wasmInitStatusAtom } from "./state";
+import {
+  wasmInitErrorAtom,
+  wasmInitializationAtom,
+  wasmInitStatusAtom,
+} from "./state";
 import { fallbackFileStore, notebookFileStore } from "./store";
 import { isWasm } from "./utils";
 import type { SaveWorkerSchema } from "./worker/save-worker";
@@ -137,6 +141,7 @@ export class PyodideBridge implements RunRequests, EditRequests {
         });
         return;
       }
+      store.set(wasmInitErrorAtom, error);
       store.set(wasmInitStatusAtom, "error");
       this.initialized.reject(new Error(error));
     });
