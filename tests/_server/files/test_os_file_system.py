@@ -133,6 +133,121 @@ def test_create_rejects_path_traversal(
     assert not (test_dir.parent / "escaped.txt").exists()
 
 
+class _ChunkedSource:
+    """Minimal async byte source emitting predetermined chunks.
+
+    If ``fail_after`` is set, raises ``RuntimeError`` after that many reads
+    have returned data — useful for simulating mid-stream upload failures.
+    """
+
+    def __init__(
+        self, chunks: list[bytes], *, fail_after: int | None = None
+    ) -> None:
+        self._chunks = list(chunks)
+        self._fail_after = fail_after
+        self._reads = 0
+
+    async def read(self, size: int = -1, /) -> bytes:
+        if self._fail_after is not None and self._reads >= self._fail_after:
+            raise RuntimeError("stream failed")
+        if not self._chunks:
+            return b""
+        # Honor size by returning the next chunk if it fits, else slicing.
+        chunk = self._chunks[0]
+        if size < 0 or len(chunk) <= size:
+            out = self._chunks.pop(0)
+        else:
+            out, self._chunks[0] = chunk[:size], chunk[size:]
+        self._reads += 1
+        return out
+
+
+def _part_files(directory: Path) -> list[Path]:
+    return list(directory.glob("*.part"))
+
+
+async def test_stream_create_file_writes_chunks(
+    test_dir: Path, fs: OSFileSystem
+) -> None:
+    source = _ChunkedSource([b"hello ", b"streamed ", b"world"])
+    info = await fs.stream_create_file(str(test_dir), "out.bin", source)
+    out_path = test_dir / "out.bin"
+    assert out_path.read_bytes() == b"hello streamed world"
+    assert info.path == str(out_path)
+    assert _part_files(test_dir) == []
+
+
+async def test_stream_create_file_writes_empty_file(
+    test_dir: Path, fs: OSFileSystem
+) -> None:
+    info = await fs.stream_create_file(
+        str(test_dir), "empty.bin", _ChunkedSource([])
+    )
+    out_path = test_dir / "empty.bin"
+    assert out_path.exists()
+    assert out_path.read_bytes() == b""
+    assert info.path == str(out_path)
+    assert _part_files(test_dir) == []
+
+
+async def test_stream_create_file_generates_unique_path(
+    test_dir: Path, fs: OSFileSystem
+) -> None:
+    (test_dir / "dup.bin").write_bytes(b"existing")
+    info = await fs.stream_create_file(
+        str(test_dir), "dup.bin", _ChunkedSource([b"new"])
+    )
+    assert info.path == str(test_dir / "dup_1.bin")
+    assert (test_dir / "dup.bin").read_bytes() == b"existing"
+    assert (test_dir / "dup_1.bin").read_bytes() == b"new"
+
+
+async def test_stream_create_file_rejects_traversal(
+    test_dir: Path, fs: OSFileSystem
+) -> None:
+    with pytest.raises(ValueError):
+        await fs.stream_create_file(
+            str(test_dir), "../escape.bin", _ChunkedSource([b"x"])
+        )
+    assert not (test_dir.parent / "escape.bin").exists()
+
+
+async def test_stream_create_file_cleans_up_on_immediate_failure(
+    test_dir: Path, fs: OSFileSystem
+) -> None:
+    source = _ChunkedSource([], fail_after=0)
+    with pytest.raises(RuntimeError):
+        await fs.stream_create_file(str(test_dir), "no_file.bin", source)
+    assert not (test_dir / "no_file.bin").exists()
+    assert _part_files(test_dir) == []
+
+
+async def test_stream_create_file_cleans_up_on_mid_stream_failure(
+    test_dir: Path, fs: OSFileSystem
+) -> None:
+    # The realistic case: a few chunks already written when the source
+    # raises (network drop, client disconnect, etc).
+    source = _ChunkedSource([b"first ", b"second ", b"third"], fail_after=2)
+    with pytest.raises(RuntimeError):
+        await fs.stream_create_file(str(test_dir), "partial.bin", source)
+    assert not (test_dir / "partial.bin").exists()
+    assert _part_files(test_dir) == []
+
+
+async def test_stream_create_file_enforces_size_cap(
+    test_dir: Path, fs: OSFileSystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Shrink the cap so the test is fast; the production value is 1 GiB.
+    monkeypatch.setattr(
+        "marimo._server.files.os_file_system.MAX_UPLOAD_BYTES", 8
+    )
+    source = _ChunkedSource([b"aaaa", b"bbbb", b"too much"])
+    with pytest.raises(ValueError, match="exceeds maximum size"):
+        await fs.stream_create_file(str(test_dir), "big.bin", source)
+    assert not (test_dir / "big.bin").exists()
+    assert _part_files(test_dir) == []
+
+
 def test_list_files(test_dir: Path, fs: OSFileSystem) -> None:
     test_create_file(test_dir, fs)
     test_create_directory(test_dir, fs)

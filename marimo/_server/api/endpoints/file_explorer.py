@@ -120,15 +120,20 @@ async def create_file_or_directory(
                         $ref: "#/components/schemas/FileCreateResponse"
     """
     try:
-        parsed = await parse_multipart_request(
+        async with parse_multipart_request(
             request, FileCreateMultipartRequest
-        )
-        info = file_system.create_file_or_directory(
-            parsed.body.path,
-            parsed.body.type,
-            parsed.body.name,
-            parsed.files.get("file"),
-        )
+        ) as parsed:
+            upload = parsed.files.get("file")
+            # Stream when there's actual file content; the in-memory create
+            # path still handles directories and the default-template notebook.
+            if upload is not None and parsed.body.type in ("file", "notebook"):
+                info = await file_system.stream_create_file(
+                    parsed.body.path, parsed.body.name, upload
+                )
+            else:
+                info = file_system.create_file_or_directory(
+                    parsed.body.path, parsed.body.type, parsed.body.name, None
+                )
         return FileCreateResponse(success=True, info=info)
     except Exception as e:
         LOGGER.error(f"Error creating file or directory: {e}")
